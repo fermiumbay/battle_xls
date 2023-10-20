@@ -1,0 +1,1256 @@
+#define tn "battle_xls"
+#packopt name tn
+#packopt hide 1
+
+/******************************************************************************
+RPGツクール 200x イベント内容のクリップボード取得・書きこみモジュール
+
+作者 イノビア
+http://homepage2.nifty.com/MJHS/ (http://www.hinekure.net/)
+
+http://www.tkooler.net/
+
+※ 自由に転載・改造・配布可能です。
+
+・命令
+getcbbin p1 【クリップボードからバイナリデータを取得します】
+
+p1 = 代入変数
+
+戻り値(stat)
+
+0 以上 : 正常終了でバッファサイズとなっています。
+-1 : クリップボードを開けない
+-2 : クリップボードの中身がない
+-3 : ツクール形式のクリップボードではない
+-4 : データが取れない
+-5 : グローバルメモリの確保に失敗
+-6 : グローバルメモリのロック失敗
+-7 : グローバルメモリのコピーに失敗
+
+------------------------------------------------------------------------------
+setcbbin p1,p2 【クリップボードにデータを書き込みます】
+
+p1 = 代入変数
+p2 = バッファのサイズ
+
+戻り値(stat)
+
+0  : 正常終了
+-1 : サイズ異常
+-2 : グローバルメモリの確保に失敗
+-3 : グローバルメモリのロック失敗
+-4 : クリップボードを開けない
+-5 : クリップボードの所有権取得に失敗
+-6 : クリップボードのコピーに失敗
+
+******************************************************************************/
+
+#include "user32.as"
+#include "kernel32.as"
+#module "_TKOOLEVCB_"
+
+// 共通
+#deffunc _opencb
+	repeat 100
+		OpenClipboard 0
+		res=stat
+		if res!0 : break
+	loop
+	return res
+
+#deffunc getcbbin var cbBinBuf
+
+	_opencb
+	// 失敗
+	if stat=0 : return -1
+
+	// 数を取得
+	CountClipboardFormats
+	if stat=0 : CloseClipboard : return -2
+	formatsNum = stat
+
+	// 内容が 566 かどうか？
+	res = 0
+	repeat formatsNum
+		EnumClipboardFormats 0
+		if stat=582 : res = 1 :	break
+		if stat=0 :	continue
+	loop
+
+	// 566 が見つからない
+	if res=0 : CloseClipboard : return -3
+
+	// データ取得
+	GetClipboardData 582
+	if stat=0 :	CloseClipboard : return -4
+	hGlobalMem = stat	
+
+	// グローバルメモリブロックのサイズ取得
+	GlobalSize hGlobalMem
+	if stat=0 :	CloseClipboard : return -5
+	globalMemLen = stat
+
+	// 受け取りバッファー初期化
+	sdim cbBinBuf,globalMemLen
+	bufPtr = varptr(cbBinBuf)
+
+	// グローバルメモリブロックをロック
+	GlobalLock hGlobalMem
+	if stat=0 :	CloseClipboard : return -6
+	globalMemPtr = stat
+
+	// バッファーへコピー
+	dupptr cbBinBuf,globalMemPtr,globalMemLen,2
+	res = stat
+	GlobalUnlock hGlobalMem
+	CloseClipboard
+	if res=0 : return -7
+
+	// サイズを返す
+	return globalMemLen
+
+// これだけ定義されていないので書いておく
+#uselib "kernel32.dll"
+#func CopyMemory "RtlMoveMemory" sptr, sptr, sptr
+
+#deffunc setcbbin var cbBinBuf,int size
+
+	// サイズチェック
+	if size<=0 : return -1
+
+	// グローバルメモリブロック確保
+	GlobalAlloc 66,size
+	if stat=0 : return -2
+
+	hGlobalMem = stat
+
+	// ポインター取得
+	binptr = varptr(cbBinBuf)
+
+	// グローバルメモリブロックをロック
+	GlobalLock hGlobalMem
+	if stat=0 : GlobalFree hGlobalMem : return -3
+
+	globalMemPtr = stat
+
+	// グローバルメモリブロックにコピー(結果が返ってこないのでちと不安)
+	CopyMemory globalMemPtr,binptr,size
+
+	// グローバルメモリブロックのロック解除
+	GlobalUnlock hGlobalMem
+
+	// クリップボードオープン
+	_opencb
+	if stat=0 : GlobalFree hGlobalMem : return -4
+
+	// クリップボードの所有権をゲット
+	EmptyClipboard
+	if stat=0 : GlobalFree hGlobalMem : CloseClipboard : return -5
+
+	// クリップボードにコピー
+	SetClipboardData 582,hGlobalMem
+	if stat=0 : GlobalFree hGlobalMem : CloseClipboard : return -6
+
+	// クリップボードをクローズ
+	CloseClipboard
+
+	return 0
+	
+#global
+
+#include "hspext.as"
+
+goto *@f
+
+#defcfunc get_data
+	count++
+	return peek(data, count - 1)
+
+#defcfunc get_ber int ber_p, local ret, local tmp
+	repeat limit(ber_p, 1, 99999)
+		ret = 0
+		repeat
+			tmp  = get_data()
+			if tmp < 0x80 : ret += tmp : break
+			ret += tmp - 0x80
+			ret *= 0x80
+		loop
+	loop
+return ret
+
+#defcfunc cleaning str get_s, local ret, local tmp // \をすべて\\に書き換える
+	ret = get_s
+	repeat
+		if instr(ret, cnt, "\\") = -1 : break
+		tmp = cnt + instr(ret, cnt, "\\")
+		ret = strmid(ret, 0, tmp) + "\\" + strmid(ret, tmp, strlen(ret)) : continue tmp + 2
+	loop
+return ret
+
+#defcfunc get_str int get_p, local ret, local get_size
+	get_size = get_ber(get_p)
+	sdim ret, get_size + 1
+	repeat get_size
+		poke ret, cnt, peek(data, count + cnt)
+	loop
+	ret = cleaning(ret)
+	count += get_size
+return ret
+
+#deffunc put int put_i
+	poke data, size, put_i
+	size++
+return
+
+#deffunc ber int ber_i
+	ber_i2 = ber_i
+	if ber_i >= 0x000080 : size++
+	if ber_i >= 0x004000 : size++
+	if ber_i >= 0x200000 : size++
+	if ber_i <         0 : size += 4 : ber_i2 = 0x10000000 + ber_i2 : poke data, size - 4, 0x8f
+	repeat
+		poke data, size - cnt, ber_i2 \ 0x80
+		if cnt > 0 : poke data, size - cnt, peek(data, size - cnt) + 0x80
+		ber_i2 >> 7
+		if ber_i2 = 0 : break
+	loop
+	size++
+return
+
+#deffunc putstr str put_s
+	ber strlen(put_s)
+	put_s2 = put_s
+	repeat strlen(put_s2)
+		put peek(put_s2, cnt)
+	loop
+return
+	
+#defcfunc berlen int pii
+	pj = 0
+	if pii >= 0x000080 : pj++
+	if pii >= 0x004000 : pj++
+	if pii >= 0x200000 : pj++
+	if pii <         0 : pj += 4
+	pj++
+/*
+	pi = pii
+	if pi < 0 : pi += 0x10000000
+	pj = 1
+	do
+		if pi >= 0x80 : pi /= 0x80 : pj++
+	until pi < 0x80
+*/
+return pj
+
+// 後から領域全体のサイズを代入（indexで記録した所から現在のsizeの位置までのサイズ値を頭に付加する）
+#deffunc set_total_size int index
+	total_size = size - index	// 領域全体のサイズを計算
+	ber total_size	// とりあえず末尾にそのサイズを格納（BER列にしたいため）
+	sdim size_tmp, berlen(total_size)	// さっき作ったBERを一時格納
+	repeat berlen(total_size)
+		poke size_tmp, cnt, peek(data, size - berlen(total_size) + cnt)
+	loop
+	repeat total_size	// 全体サイズを格納する領域を割り込んで入れるので、全体ずらす
+		poke data, size - cnt - 1, peek(data, size - cnt - 1 - berlen(total_size))
+	loop
+	repeat berlen(total_size)	// 一時格納しておいたBERを実際のdataに格納する
+		poke data, index + cnt, peek(size_tmp, cnt)
+	loop
+	return
+
+*@
+	/*
+	size = 10
+	sdim data, 10
+	count = 0
+	poke data, 0, 0x8f
+	poke data, 1, 0xff
+	poke data, 2, 0xff
+	poke data, 3, 0xff
+	poke data, 4, 0x18
+	dialog get_ber()
+	end*/
+	
+// 画面構成
+screen 0, 400, 100, , ginfo_dispx - 400 - 10, 10
+title "戦闘アニメ_エクセル相互変換"
+objmode 2
+font "メイリオ", 16
+objsize 400, 50
+button "ツクール → エクセル 変換", *bt_load
+button "エクセル → ツクール 変換", *bt_save
+
+// 定数
+#define FRAME_MAX_NUM 500
+#define CELL_MAX_NUM 8
+
+dlm = "\t"	// 区切り文字
+
+*system_top
+
+// 各変数初期化
+anime_name = ""	// 戦闘アニメ情報：名前
+anime_pic = ""	// 戦闘アニメ情報：画像
+anime_target = 0	// 戦闘アニメ情報：適用範囲
+anime_y = 2	// 戦闘アニメ情報：y基準
+frame_num = 1	// フレームの総数
+frame_id = 0	// 現在取得中のフレームID（0が1F目を表す）
+sdim sound_name, 100, FRAME_MAX_NUM	// [2D]効果音名
+dim sound_volume, FRAME_MAX_NUM	// [2D]音量
+dim sound_tempo, FRAME_MAX_NUM	// [2D]テンポ
+dim sound_pan, FRAME_MAX_NUM	// [2D]左右ﾊﾞﾗﾝｽ
+dim sound_name_num, FRAME_MAX_NUM	// [1D]効果音総数
+dim sound_volume_num, FRAME_MAX_NUM	// [1D]音量総数
+dim sound_tempo_num, FRAME_MAX_NUM	// [1D]テンポ総数
+dim sound_pan_num, FRAME_MAX_NUM	// [1D]左右ﾊﾞﾗﾝｽ総数
+dim flash_target, FRAME_MAX_NUM	// [2D]ﾌﾗｯｼｭ対象
+dim flash_r, FRAME_MAX_NUM	// [2D]ﾌﾗｯｼｭR
+dim flash_g, FRAME_MAX_NUM	// [2D]ﾌﾗｯｼｭG
+dim flash_b, FRAME_MAX_NUM	// [2D]ﾌﾗｯｼｭB
+dim flash_v, FRAME_MAX_NUM	// [2D]ﾌﾗｯｼｭV
+dim flash_target_num, FRAME_MAX_NUM	// [1D]ﾌﾗｯｼｭ対象総数
+dim flash_r_num, FRAME_MAX_NUM	// [1D]ﾌﾗｯｼｭR総数
+dim flash_g_num, FRAME_MAX_NUM	// [1D]ﾌﾗｯｼｭG総数
+dim flash_b_num, FRAME_MAX_NUM	// [1D]ﾌﾗｯｼｭB総数
+dim flash_v_num, FRAME_MAX_NUM	// [1D]ﾌﾗｯｼｭV総数
+dim cell_pattern_id, FRAME_MAX_NUM	// [2D]ﾊﾟﾀｰﾝID
+dim cell_x, FRAME_MAX_NUM	// [2D]座標x
+dim cell_y, FRAME_MAX_NUM	// [2D]座標y
+dim cell_zoom, FRAME_MAX_NUM	// [2D]拡大率
+dim cell_r, FRAME_MAX_NUM	// [2D]R
+dim cell_g, FRAME_MAX_NUM	// [2D]G
+dim cell_b, FRAME_MAX_NUM	// [2D]B
+dim cell_s, FRAME_MAX_NUM	// [2D]S
+dim cell_trans, FRAME_MAX_NUM	// [2D]透明度
+dim cell_pattern_id_num, FRAME_MAX_NUM	// [1D]ﾊﾟﾀｰﾝID
+dim cell_x_num, FRAME_MAX_NUM	// [1D]座標x
+dim cell_y_num, FRAME_MAX_NUM	// [1D]座標y
+dim cell_zoom_num, FRAME_MAX_NUM	// [1D]拡大率
+dim cell_r_num, FRAME_MAX_NUM	// [1D]R
+dim cell_g_num, FRAME_MAX_NUM	// [1D]G
+dim cell_b_num, FRAME_MAX_NUM	// [1D]B
+dim cell_s_num, FRAME_MAX_NUM	// [1D]S
+dim cell_trans_num, FRAME_MAX_NUM	// [1D]透明度
+cell_max = 0	// 存在するセルの最大数
+
+// 読み書き用バッファ
+sdim z, 500000
+
+// 一時格納用文字列
+tmp_str = ""
+
+stop
+
+*bt_load
+gosub *load
+goto *system_top
+
+*bt_save
+gosub *save
+goto *system_top
+
+// ツクールからロード（エクセルに変換）
+*load
+getcbbin data
+data_stat = stat
+if data_stat < 0 : dialog "クリップボードにRPGツクール200Xの\nイベント命令をコピーして下さい。", 1, tn : return
+size = data_stat
+
+/*
+screen 0, 640, 480, , 50, 50
+title "" + size + "Byte"
+z = ""
+repeat size
+	z += "" + strf("%02X", peek(data, cnt)) + " "
+	if cnt \ 16 = 15 : z += "\n"
+loop
+mesbox z, 640, 480, 0, 65535
+stop
+;*/
+
+count = 8
+num = 0
+mode = 1
+*top
+	switch mode
+	case 1
+		property = get_ber()
+		switch property
+		case 0x00
+			swbreak
+		case 0x01
+			mode = 10
+			swbreak
+		case 0x02
+			mode = 11
+			swbreak
+		case 0x06
+			mode = 4
+			swbreak
+		case 0x09
+			mode = 8
+			swbreak
+		case 0x0A
+			mode = 9
+			swbreak
+		case 0x0C
+			mode = 7
+			swbreak
+		default
+			mode = 2
+			swbreak
+		swend
+		swbreak
+	case 2
+		dummy = get_ber()
+		mode = 3
+		swbreak
+	case 3
+		switch property
+		case 1
+		case 2
+			dummy_str = get_str()
+			mode = 1
+			swbreak
+		default
+			dummy = get_data()
+			num--
+			if num <= 0 {
+				mode = 1
+			}
+			swbreak
+		swend
+		swbreak
+	
+	// 効果音とフラッシュのタイミング
+	case 4
+		sound_num = get_ber(2)
+		if sound_num = 0{
+			mode = 1
+		}else{
+			mode = 5
+		}
+		swbreak
+	case 5
+		dummy = get_ber()	
+		mode = 6
+		swbreak
+	case 6
+		sound_tag = get_ber()
+		switch sound_tag
+		case 0
+			sound_num--
+			if sound_num <= 0{
+				mode = 1
+			}else{
+				mode = 5
+			}
+			swbreak
+		case 1
+			frame_id = get_ber(2) - 1
+			swbreak
+		case 2
+			dummy = get_ber()
+			repeat
+				sound_tag_tag = get_ber()
+				switch sound_tag_tag
+				case 0
+					break
+					swbreak
+				case 1
+					sound_name(frame_id, sound_name_num(frame_id)) = get_str()
+					sound_volume(frame_id, sound_volume_num(frame_id)) = 100
+					sound_tempo(frame_id, sound_tempo_num(frame_id)) = 100
+					sound_pan(frame_id, sound_pan_num(frame_id)) = 50
+					sound_name_num(frame_id)++
+					sound_volume_num(frame_id)++
+					sound_tempo_num(frame_id)++
+					sound_pan_num(frame_id)++
+					swbreak
+				case 3
+					sound_volume(frame_id, sound_volume_num(frame_id) - 1) = get_ber(2)
+					swbreak
+				case 4
+					sound_tempo(frame_id, sound_tempo_num(frame_id) - 1) = get_ber(2)
+					swbreak
+				case 5
+					sound_pan(frame_id, sound_pan_num(frame_id) - 1) = get_ber(2)
+					swbreak
+				swend
+			loop
+			swbreak
+		case 3
+			flash_target(frame_id, flash_target_num(frame_id)) = get_ber(2)
+			flash_r(frame_id, flash_r_num(frame_id)) = 31
+			flash_g(frame_id, flash_g_num(frame_id)) = 31
+			flash_b(frame_id, flash_b_num(frame_id)) = 31
+			flash_v(frame_id, flash_v_num(frame_id)) = 31
+			flash_target_num(frame_id)++
+			flash_r_num(frame_id)++
+			flash_g_num(frame_id)++
+			flash_b_num(frame_id)++
+			flash_v_num(frame_id)++
+			swbreak
+		case 4
+			flash_r(frame_id, flash_r_num(frame_id) - 1) = get_ber(2)
+			swbreak
+		case 5
+			flash_g(frame_id, flash_g_num(frame_id) - 1) = get_ber(2)
+			swbreak
+		case 6
+			flash_b(frame_id, flash_b_num(frame_id) - 1) = get_ber(2)
+			swbreak
+		case 7
+			flash_v(frame_id, flash_v_num(frame_id) - 1) = get_ber(2)
+			swbreak
+		swend
+		swbreak
+	
+	// 戦闘アニメ
+	case 7
+		frame_num = get_ber(2)
+		repeat frame_num
+			frame_id = get_ber() - 1
+			repeat
+				type_id = get_ber()
+				switch type_id
+				case 0
+					break
+					swbreak
+				case 1
+					// 属性1番しかない？
+					dummy = get_ber()
+					
+					cell_num = get_ber()
+					repeat cell_num
+	
+						// デフォルト値
+						dummy = get_ber()
+						cell_exist = 1
+						
+						// セルの新規作成
+						cell_pattern_id(frame_id, cell_pattern_id_num(frame_id)) = 0
+						cell_x(frame_id, cell_x_num(frame_id)) = 0
+						cell_y(frame_id, cell_y_num(frame_id)) = 0
+						cell_zoom(frame_id, cell_zoom_num(frame_id)) = 100
+						cell_r(frame_id, cell_r_num(frame_id)) = 100
+						cell_g(frame_id, cell_g_num(frame_id)) = 100
+						cell_b(frame_id, cell_b_num(frame_id)) = 100
+						cell_s(frame_id, cell_s_num(frame_id)) = 100
+						cell_trans(frame_id, cell_trans_num(frame_id)) = 0
+						cell_pattern_id_num(frame_id)++
+						cell_x_num(frame_id)++
+						cell_y_num(frame_id)++
+						cell_zoom_num(frame_id)++
+						cell_r_num(frame_id)++
+						cell_g_num(frame_id)++
+						cell_b_num(frame_id)++
+						cell_s_num(frame_id)++
+						cell_trans_num(frame_id)++
+						
+						repeat
+							
+							cell_type_id = get_ber()
+							switch cell_type_id
+							case 0
+								break
+								swbreak
+							case 1
+								cell_exist = get_ber(2)
+								swbreak
+							case 2
+								cell_pattern_id(frame_id, cell_pattern_id_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 3
+								cell_x(frame_id, cell_x_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 4
+								cell_y(frame_id, cell_y_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 5
+								cell_zoom(frame_id, cell_zoom_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 6
+								cell_r(frame_id, cell_r_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 7
+								cell_g(frame_id, cell_g_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 8
+								cell_b(frame_id, cell_b_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 9
+								cell_s(frame_id, cell_s_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							case 10
+								cell_trans(frame_id, cell_trans_num(frame_id) - 1) = get_ber(2)
+								swbreak
+							swend
+						loop
+						
+						// 新規作成の取りやめ
+						if cell_exist = 0{
+							cell_pattern_id_num(frame_id)--
+							cell_x_num(frame_id)--
+							cell_y_num(frame_id)--
+							cell_zoom_num(frame_id)--
+							cell_r_num(frame_id)--
+							cell_g_num(frame_id)--
+							cell_b_num(frame_id)--
+							cell_s_num(frame_id)--
+							cell_trans_num(frame_id)--
+						}
+	
+					loop
+	
+					if cell_pattern_id_num(frame_id) > cell_max{
+						cell_max = cell_pattern_id_num(frame_id)
+					}
+					
+					swbreak
+				swend
+			loop
+		loop
+		mode = 1
+	swbreak
+	
+	// 適用範囲
+	case 8
+		anime_target = get_ber(2)
+;		if num = 0 : z += "単体\n"
+;		if num = 1 : z += "全体\n"
+		mode = 1
+		swbreak
+	
+	// y基準
+	case 9
+		anime_y = get_ber(2)
+;		if num = 0 : z += "頭上\n"
+;		if num = 1 : z += "中心\n"
+;		if num = 2 : z += "足元\n"
+		mode = 1
+		swbreak
+	
+	// 戦闘アニメ名
+	case 10
+		anime_name = get_str()
+		mode = 1
+		swbreak
+	
+	// 戦闘アニメ素材
+	case 11
+		anime_pic = get_str()
+		mode = 1
+		swbreak
+
+	swend
+	
+	if count < size : goto *top
+
+// 書き込み開始
+
+// 情報
+z += "【戦闘アニメ情報】\n"
+z += "名前:" + dlm + anime_name + "\n"
+z += "画像:" + dlm + anime_pic + "\n"
+if anime_target = 0 : tmp_str = "単体"
+if anime_target = 1 : tmp_str = "全体"
+z += "適用範囲:" + dlm + tmp_str + "\n"
+if anime_y = 0 : tmp_str = "頭上"
+if anime_y = 1 : tmp_str = "中心"
+if anime_y = 2 : tmp_str = "足元"
+z += "Y基準:" + dlm + tmp_str + "\n"
+z += "ﾌﾚｰﾑ数:" + dlm + frame_num + "\n"
+
+z += "\n"
+
+// 効果音とフラッシュのタイミング
+z += "【効果音とフラッシュのタイミング】\n"
+z += "ﾌﾚｰﾑID" + dlm + "効果音名" + dlm + "音量" + dlm + "テンポ" + dlm + "左右ﾊﾞﾗﾝｽ" + dlm + "ﾌﾗｯｼｭ対象" + dlm + "ﾌﾗｯｼｭR" + dlm + "ﾌﾗｯｼｭG" + dlm + "ﾌﾗｯｼｭB" + dlm + "ﾌﾗｯｼｭV" + "\n"
+
+for i, 0, FRAME_MAX_NUM
+	if sound_name_num(i) = 0 & flash_target_num(i) = 0 : _continue
+	sound_id = 0
+	flash_id = 0
+	repeat
+		if sound_id >= sound_name_num(i) & flash_id >= flash_target_num(i) : break
+		z += "" + (i + 1) + dlm
+	
+		if sound_id < sound_name_num(i){
+			// 効果音
+			if sound_name(i, sound_id) ! "(OFF)"{
+				z += sound_name(i, sound_id) + dlm
+				z += "" + sound_volume(i, sound_id) + dlm
+				z += "" + sound_tempo(i, sound_id) + dlm
+				z += "" + sound_pan(i, sound_id) + dlm
+			}
+			else{
+				// 空白
+				z += dlm
+				z += dlm
+				z += dlm
+				z += dlm
+			}
+			sound_id++
+		}
+		else{
+			// 空白
+			z += dlm
+			z += dlm
+			z += dlm
+			z += dlm
+		}
+		if flash_id < flash_target_num(i){
+			// フラッシュ
+			if flash_target(i, flash_id) ! 0 {
+				if flash_target(i, flash_id) = 1 : z += "対象" + dlm
+				if flash_target(i, flash_id) = 2 : z += "画面" + dlm
+				z += "" + flash_r(i, flash_id) + dlm
+				z += "" + flash_g(i, flash_id) + dlm
+				z += "" + flash_b(i, flash_id) + dlm
+				z += "" + flash_v(i, flash_id) + dlm
+			}
+			flash_id++
+		}
+		z += "\n"
+	loop
+next
+
+z += "\n"
+
+// 戦闘アニメ本体
+z += "【戦闘アニメ本体】\n"
+z += "ﾌﾚｰﾑID" + dlm
+repeat cell_max
+	z += "ﾊﾟﾀｰﾝID" + dlm + "座標x" + dlm + "座標y" + dlm + "拡大率" + dlm + "R" + dlm + "G" + dlm + "B" + dlm + "S" + dlm + "透明度" + dlm
+loop
+z += "\n"
+
+for i, 0, FRAME_MAX_NUM
+	if cell_pattern_id_num(i) = 0 : _continue
+	cell_id = 0
+	z += "" + (i + 1) + dlm
+	repeat
+		if cell_id >= cell_pattern_id_num(i) : break
+	
+		z += "" + (cell_pattern_id(i, cell_id) + 1) + dlm
+		z += "" + cell_x(i, cell_id) + dlm
+		z += "" + cell_y(i, cell_id) + dlm
+		z += "" + cell_zoom(i, cell_id) + dlm
+		z += "" + cell_r(i, cell_id) + dlm
+		z += "" + cell_g(i, cell_id) + dlm
+		z += "" + cell_b(i, cell_id) + dlm
+		z += "" + cell_s(i, cell_id) + dlm
+		z += "" + cell_trans(i, cell_id) + dlm
+			
+		cell_id++
+	loop
+	z += "\n"
+next
+
+clipset z
+
+/*
+cls
+mesbox z, 640, 480, 0, 65536
+title "サイズ: " + size + "Byte"
+*/
+
+dialog "変換しました。", , tn
+
+return
+
+// ツクールにセーブ（エクセルから逆変換）
+*save
+
+clipget z, 500000
+
+// エクセルの文字列を読み込んでくる
+notesel z
+r_num = notemax	// 行
+dim c_num	// 行に対応する各列数
+sdim cell_data, 100, r_num	// セルの内容を(行, 列)で格納
+repeat r_num
+	noteget k, cnt
+	sdim buf
+	split k, "\t", buf
+	c_num.cnt = length(buf)
+	
+	for i, 0, c_num.cnt
+		cell_data(cnt, i) = buf.i
+	next
+	
+loop
+
+// cell_dataの解析
+// 基本はA列のみを見ていき、「ﾌﾚｰﾑID」があればその情報の取り込みを行う
+// 「ﾌﾚｰﾑID」による取り込みの終端は、ﾌﾚｰﾑIDのデータに数値以外が来たとき
+mode = 1	// 取り込みモード（1: 通常　2: ﾌﾚｰﾑIDから情報取得中）
+frame_row = 0	// フレーム情報取り込みの先頭行（情報名がある部分）
+for i, 0, r_num
+	switch mode
+	
+	// 通常モード
+	case 1
+		if cell_data(i, 0) = "名前:" : anime_name = cell_data(i, 1)
+		if cell_data(i, 0) = "画像:" : anime_pic = cell_data(i, 1)
+		if cell_data(i, 0) = "適用範囲:" {
+			if cell_data(i, 1) = "単体" : anime_target = 0
+			if cell_data(i, 1) = "全体" : anime_target = 1
+		}
+		if cell_data(i, 0) = "Y基準:" {
+			if cell_data(i, 1) = "頭上" : anime_y = 0
+			if cell_data(i, 1) = "中心" : anime_y = 1
+			if cell_data(i, 1) = "足元" : anime_y = 2
+		}
+		if cell_data(i, 0) = "ﾌﾚｰﾑ数:" : frame_num = int(cell_data(i, 1))
+		if cell_data(i, 0) = "ﾌﾚｰﾑID" {
+			mode = 2
+			frame_row = i
+		}
+		swbreak
+	
+	// 情報取り込みモード
+	case 2
+	
+		// 数値かどうかの判定を行い、非数値であれば元のモードに戻す
+		if str(int(cell_data(i, 0))) ! cell_data(i, 0){
+			mode = 1
+			i--
+			swbreak
+		}
+	
+		// フレームID取得（0が1F目）
+		frame_id = int(cell_data(i, 0)) - 1
+	
+		// 先頭行の情報を基にして、各列のデータを取得する
+		// 各データで使う値は、省略禁止（省略して31にするなどの処理は入れない）
+		// 空欄になっているものはすべて無視する
+		for j, 1, c_num.i
+	
+			// 効果音
+			if cell_data(frame_row, j) = "効果音名"{
+				if cell_data(i, j) = "" : _continue
+				sound_name(frame_id, sound_name_num(frame_id)) = cell_data(i, j)
+				sound_name_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "音量"{
+				if cell_data(i, j) = "" : _continue
+				sound_volume(frame_id, sound_volume_num(frame_id)) = int(cell_data(i, j))
+				sound_volume_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "テンポ"{
+				if cell_data(i, j) = "" : _continue
+				sound_tempo(frame_id, sound_tempo_num(frame_id)) = int(cell_data(i, j))
+				sound_tempo_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "左右ﾊﾞﾗﾝｽ"{
+				if cell_data(i, j) = "" : _continue
+				sound_pan(frame_id, sound_pan_num(frame_id)) = int(cell_data(i, j))
+				sound_pan_num(frame_id)++
+			}
+	
+			// フラッシュ
+			if cell_data(frame_row, j) = "ﾌﾗｯｼｭ対象"{
+				if cell_data(i, j) = "" : _continue
+				tmp_i = 0
+				if cell_data(i, j) = "対象" : tmp_i = 1
+				if cell_data(i, j) = "画面" : tmp_i = 2
+				flash_target(frame_id, flash_target_num(frame_id)) = tmp_i
+				flash_target_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "ﾌﾗｯｼｭR"{
+				if cell_data(i, j) = "" : _continue
+				flash_r(frame_id, flash_r_num(frame_id)) = int(cell_data(i, j))
+				flash_r_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "ﾌﾗｯｼｭG"{
+				if cell_data(i, j) = "" : _continue
+				flash_g(frame_id, flash_g_num(frame_id)) = int(cell_data(i, j))
+				flash_g_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "ﾌﾗｯｼｭB"{
+				if cell_data(i, j) = "" : _continue
+				flash_b(frame_id, flash_b_num(frame_id)) = int(cell_data(i, j))
+				flash_b_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "ﾌﾗｯｼｭV"{
+				if cell_data(i, j) = "" : _continue
+				flash_v(frame_id, flash_v_num(frame_id)) = int(cell_data(i, j))
+				flash_v_num(frame_id)++
+			}
+	
+			// 戦闘アニメセル
+			if cell_data(frame_row, j) = "ﾊﾟﾀｰﾝID"{
+				if cell_data(i, j) = "" : _continue
+				cell_pattern_id(frame_id, cell_pattern_id_num(frame_id)) = int(cell_data(i, j))
+				cell_pattern_id_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "座標x"{
+				if cell_data(i, j) = "" : _continue
+				cell_x(frame_id, cell_x_num(frame_id)) = int(cell_data(i, j))
+				cell_x_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "座標y"{
+				if cell_data(i, j) = "" : _continue
+				cell_y(frame_id, cell_y_num(frame_id)) = int(cell_data(i, j))
+				cell_y_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "拡大率"{
+				if cell_data(i, j) = "" : _continue
+				cell_zoom(frame_id, cell_zoom_num(frame_id)) = int(cell_data(i, j))
+				cell_zoom_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "R"{
+				if cell_data(i, j) = "" : _continue
+				cell_r(frame_id, cell_r_num(frame_id)) = int(cell_data(i, j))
+				cell_r_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "G"{
+				if cell_data(i, j) = "" : _continue
+				cell_g(frame_id, cell_g_num(frame_id)) = int(cell_data(i, j))
+				cell_g_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "B"{
+				if cell_data(i, j) = "" : _continue
+				cell_b(frame_id, cell_b_num(frame_id)) = int(cell_data(i, j))
+				cell_b_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "S"{
+				if cell_data(i, j) = "" : _continue
+				cell_s(frame_id, cell_s_num(frame_id)) = int(cell_data(i, j))
+				cell_s_num(frame_id)++
+			}
+			if cell_data(frame_row, j) = "透明度"{
+				if cell_data(i, j) = "" : _continue
+				cell_trans(frame_id, cell_trans_num(frame_id)) = int(cell_data(i, j))
+				cell_trans_num(frame_id)++
+			}
+			
+		next
+		
+		swbreak
+	swend
+next
+
+// データ書き込み
+sdim data, 100000
+size = 4
+
+// 最初の4バイトは全体サイズ 最後に格納する
+
+// 次の4バイトは謎の数列
+put 1 : put 0 : put 0 : put 0
+
+// 戦闘アニメ：名前
+put 1 : putstr anime_name
+
+// 戦闘アニメ：グラフィック素材
+put 2 : putstr anime_pic
+
+// 効果音とフラッシュのタイミング
+put 6 : // この直後にサイズが来るので、現在のサイズ値を残しておいて後で追加する
+header_index = size
+
+// エフェクト総数を数える
+dim effect_frame_id
+effect_num = 0
+repeat FRAME_MAX_NUM
+	// 各フレームで効果音とフラッシュの多い方を足していく
+	if sound_name_num.cnt > flash_target_num.cnt{
+		tmp_i = sound_name_num.cnt
+	}else{
+		tmp_i = flash_target_num.cnt
+	}
+	for i, 0, tmp_i
+		effect_frame_id(effect_num) = cnt
+		effect_num++
+	next
+loop
+
+// エフェクト総数
+ber effect_num
+
+// エフェクトをそれぞれ追加していく
+prev_effect_frame_id = -1	// 前回エフェクトのフレーム番号
+effect_id = 0	// 現在見ているフレームのエフェクト番号
+repeat effect_num
+	ber cnt + 1	// エフェクト番号
+	
+	// エフェクト番号の更新
+	if prev_effect_frame_id ! effect_frame_id.cnt{
+		prev_effect_frame_id = effect_frame_id.cnt
+		effect_id = 0
+	}
+	else{
+		effect_id++
+	}
+	
+	// 時刻
+	ber 1
+	ber berlen(effect_frame_id.cnt + 1)
+	ber effect_frame_id.cnt + 1
+	
+	// 効果音
+	ber 2
+	effect_size = 0	// 効果音サイズ（オプション1, 3, 4, 5の部分のサイズ全部を初めに計算しておいて全部足す）
+	
+	effect_sound_name = "(OFF)"
+	effect_sound_volume = 100
+	effect_sound_tempo = 100
+	effect_sound_pan = 50
+	if effect_id < sound_name_num(effect_frame_id.cnt) {
+		if sound_name_num(effect_frame_id.cnt) > effect_id : effect_sound_name = sound_name(effect_frame_id.cnt, effect_id)
+		if sound_volume_num(effect_frame_id.cnt) > effect_id : effect_sound_volume = sound_volume(effect_frame_id.cnt, effect_id)
+		if sound_tempo_num(effect_frame_id.cnt) > effect_id : effect_sound_tempo = sound_tempo(effect_frame_id.cnt, effect_id)
+		if sound_pan_num(effect_frame_id.cnt) > effect_id : effect_sound_pan = sound_pan(effect_frame_id.cnt, effect_id)
+	}
+	
+	// 効果音名サイズ
+	effect_size += 1	// 効果音名タグ
+	effect_size += berlen(strlen(effect_sound_name))	// 効果音名サイズ
+	effect_size += strlen(effect_sound_name)	// 効果音名
+	
+	// 音量サイズ
+	effect_size += 1	// 音量タグ
+	effect_size += 1	// 音量サイズ
+	effect_size += berlen(effect_sound_volume)	// 音量
+	
+	// テンポサイズ
+	effect_size += 1	// テンポタグ
+	effect_size += 1	// テンポサイズ
+	effect_size += berlen(effect_sound_tempo)	// テンポ
+
+	// 左右バランスサイズ
+	effect_size += 1	// 左右バランスタグ
+	effect_size += 1	// 左右バランスサイズ
+	effect_size += berlen(effect_sound_pan)	// 左右バランス
+	
+	// 終了コードサイズ
+	effect_size += 1
+
+	// 効果音サイズ格納
+	ber effect_size
+	
+	// 効果音名
+	ber 1
+	putstr effect_sound_name
+	
+	// 音量
+	ber 3
+	ber berlen(effect_sound_volume)
+	ber effect_sound_volume
+	
+	// テンポ
+	ber 4
+	ber berlen(effect_sound_tempo)
+	ber effect_sound_tempo
+	
+	// 左右バランス
+	ber 5
+	ber berlen(effect_sound_pan)
+	ber effect_sound_pan
+	
+	// 終了コード
+	ber 0
+	
+	// フラッシュ
+	effect_flash_target = 0
+	effect_flash_r = 31
+	effect_flash_g = 31
+	effect_flash_b = 31
+	effect_flash_v = 31
+	if effect_id < flash_target_num(effect_frame_id.cnt) {
+		if flash_target_num(effect_frame_id.cnt) > effect_id : effect_flash_target = flash_target(effect_frame_id.cnt, effect_id)
+		if flash_r_num(effect_frame_id.cnt) > effect_id : effect_flash_r = flash_r(effect_frame_id.cnt, effect_id)
+		if flash_g_num(effect_frame_id.cnt) > effect_id : effect_flash_g = flash_g(effect_frame_id.cnt, effect_id)
+		if flash_b_num(effect_frame_id.cnt) > effect_id : effect_flash_b = flash_b(effect_frame_id.cnt, effect_id)
+		if flash_v_num(effect_frame_id.cnt) > effect_id : effect_flash_v = flash_v(effect_frame_id.cnt, effect_id)
+	}
+	
+	// フラッシュ対象
+	ber 3
+	ber berlen(effect_flash_target)
+	ber effect_flash_target
+	
+	// フラッシュR
+	ber 4
+	ber berlen(effect_flash_r)
+	ber effect_flash_r
+	
+	// フラッシュG
+	ber 5
+	ber berlen(effect_flash_g)
+	ber effect_flash_g
+	
+	// フラッシュB
+	ber 6
+	ber berlen(effect_flash_b)
+	ber effect_flash_b
+	
+	// フラッシュV
+	ber 7
+	ber berlen(effect_flash_v)
+	ber effect_flash_v
+	
+	// エフェクト終了コード
+	ber 0
+
+loop
+
+// 効果音領域全体のサイズを代入
+set_total_size header_index
+
+// 戦闘アニメ：適用範囲
+put 9 : ber berlen(anime_target) : ber anime_target
+
+// 戦闘アニメ：Y基準
+put 10 : ber berlen(anime_y) : ber anime_y
+
+// 戦闘アニメ各セル
+put 12 : // この直後にサイズが来るので、現在のサイズ値を残しておいて後で追加する
+header_index = size
+
+// フレーム数
+ber frame_num
+
+// 全セル繰り返し
+repeat FRAME_MAX_NUM
+	
+	// フレーム番号
+	ber cnt + 1
+	
+	if cell_pattern_id_num.cnt = 0 {
+		// 何もなければ 01 01 00 00 を追加
+		put 1 : put 1 : put 0 : put 0
+		continue
+	}
+
+	// 属性1番（不明）
+	put 1 :	// この直後にもサイズが来る。現在のサイズ値を記録
+	header_index_2 = size
+	
+	// セルの個数
+	ber cell_pattern_id_num.cnt
+	
+	// セルの個数だけ繰り返し
+	// すべてのセルを詰めて表示するので、飛び番号はなし
+	for i, 0, cell_pattern_id_num.cnt
+	
+		// 各値を予め保持しておく
+		effect_cell_pattern_id = 0
+		effect_cell_x = 0
+		effect_cell_y = 0
+		effect_cell_zoom = 100
+		effect_cell_r = 100
+		effect_cell_g = 100
+		effect_cell_b = 100
+		effect_cell_s = 100
+		effect_cell_trans = 0
+		if cell_pattern_id_num(cnt) > i : effect_cell_pattern_id = cell_pattern_id(cnt, i)
+		if cell_x_num(cnt) > i : effect_cell_x = cell_x(cnt, i)
+		if cell_y_num(cnt) > i : effect_cell_y = cell_y(cnt, i)
+		if cell_zoom_num(cnt) > i : effect_cell_zoom = cell_zoom(cnt, i)
+		if cell_r_num(cnt) > i : effect_cell_r = cell_r(cnt, i)
+		if cell_g_num(cnt) > i : effect_cell_g = cell_g(cnt, i)
+		if cell_b_num(cnt) > i : effect_cell_b = cell_b(cnt, i)
+		if cell_s_num(cnt) > i : effect_cell_s = cell_s(cnt, i)
+		if cell_trans_num(cnt) > i : effect_cell_trans = cell_trans(cnt, i)
+	
+		// セル番号
+		ber i + 1
+	
+		// パターン番号
+		ber 2
+		ber berlen(effect_cell_pattern_id - 1)
+		ber effect_cell_pattern_id - 1
+	
+		// 座標x
+		ber 3
+		ber berlen(effect_cell_x)
+		ber effect_cell_x
+	
+		// 座標y
+		ber 4
+		ber berlen(effect_cell_y)
+		ber effect_cell_y
+
+		// 拡大率
+		ber 5
+		ber berlen(effect_cell_zoom)
+		ber effect_cell_zoom
+
+		// R
+		ber 6
+		ber berlen(effect_cell_r)
+		ber effect_cell_r
+
+		// G
+		ber 7
+		ber berlen(effect_cell_g)
+		ber effect_cell_g
+
+		// B
+		ber 8
+		ber berlen(effect_cell_b)
+		ber effect_cell_b
+
+		// S
+		ber 9
+		ber berlen(effect_cell_s)
+		ber effect_cell_s
+
+		// 透明度
+		ber 10
+		ber berlen(effect_cell_trans)
+		ber effect_cell_trans
+	
+		// 終了コード
+		ber 0
+
+	next
+	
+	// 属性1番のサイズを付加
+	set_total_size header_index_2
+	
+	// 終了コード
+	ber 0
+	
+loop
+
+// 戦闘アニメ全体のサイズを付加
+set_total_size header_index
+
+// 最後の終了コードを付加
+ber 0
+
+/*
+tmptmp = ""
+
+goto *@f
+#defcfunc converttt str aaa
+ret = int(aaa)
+if aaa = "A" : ret = 10
+if aaa = "B" : ret = 11
+if aaa = "C" : ret = 12
+if aaa = "D" : ret = 13
+if aaa = "E" : ret = 14
+if aaa = "F" : ret = 15
+return ret
+*@
+repeat strlen(tmptmp) / 2
+	put converttt(strmid(tmptmp, cnt * 2, 1)) * 16 + converttt(strmid(tmptmp, cnt * 2 + 1, 1))
+loop
+*/
+
+// 最後に全体サイズ格納
+repeat 4
+	poke data, cnt, ((size - 8) >> 8 * cnt) \ 0x100
+loop
+	
+setcbbin data, size
+
+dialog "変換しました。", , tn
+
+return
